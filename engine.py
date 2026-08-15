@@ -5,12 +5,22 @@ from tqdm.auto import tqdm
 from torch.optim import Optimizer
 
 
-def train_one_epoch(encoder: nn.Module, decoder: nn.Module, dataloader, optimizer: Optimizer, criterion, accelerator: Accelerator, max_norm = 1.0):
+def train_one_epoch(
+    encoder: nn.Module,
+    decoder: nn.Module,
+    dataloader,
+    optimizer: Optimizer,
+    criterion,
+    accelerator: Accelerator,
+    max_norm=1.0,
+    show_progress: bool = True,
+):
     encoder.train() 
     decoder.train()
 
     running_loss: float = 0
-    pbar = tqdm(dataloader, desc="Training", leave=False, disable=not accelerator.is_local_main_process)
+    progress_enabled = show_progress and accelerator.is_local_main_process
+    pbar = tqdm(dataloader, desc="Training", leave=False, disable=not progress_enabled)
 
     params = list(filter(
         lambda p: p.requires_grad,
@@ -42,7 +52,8 @@ def train_one_epoch(encoder: nn.Module, decoder: nn.Module, dataloader, optimize
         train_loss = accelerator.reduce(loss.detach(),reduction="mean").item()
         running_loss += train_loss
 
-        pbar.set_postfix({"Train loss": f"{train_loss:.4f}"})
+        if progress_enabled:
+            pbar.set_postfix({"Train loss": f"{train_loss:.4f}"})
 
     return running_loss / len(dataloader)
 
