@@ -6,51 +6,67 @@ from config import Backbone
 
 
 class ResNet50Encoder(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model: int):
         super().__init__()
+        resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+        # Remove global average pooling and the classification layer.
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
+        self.backbone.requires_grad_(False)
 
-        self.d_model = d_model
-        vit = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        # bỏ lớp AvgPool và FC
-        custom = list(vit.children())[:-2] 
+        # Convert each 2048-dimensional spatial feature to d_model.
+        self.projection = nn.Conv2d(2048, d_model, kernel_size=1)
 
-        self.backbone = nn.Sequential(*custom)
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-
-        # output feature cuối của resnet50 là [b, 2048, 7, 7]
-        # số channels = số kernel, mục tiêu nén xuống còn bằng d_model
-        self.conv1x1 = nn.Conv2d(in_channels=2048, out_channels=d_model, kernel_size=1)
-
-    def forward(self, images):
-        # backbone sẽ không update BatchNorm stats
+    def forward(self, images: Tensor) -> Tensor:
+        # Keep BatchNorm statistics fixed while using the frozen backbone.
         self.backbone.eval()
         with torch.no_grad():
-            features: Tensor = self.backbone(images)
-        features = self.conv1x1(features) # [B, d_model, 7, 7]
-        features = features.flatten(2) # nén chiều 2,3 thành 1. [B, d_model, 49]
-        features = features.permute(0, 2, 1)
-        return features
+            features = self.backbone(images)  # [B, 2048, 7, 7]
+
+        # Treat each position in the 7x7 feature map as one image token.
+        return self.projection(features).flatten(2).transpose(1, 2)
 
 
 class EfficientNetB3Encoder(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model: int):
         super().__init__()
         efficientnet = models.efficientnet_b3(weights=models.EfficientNet_B3_Weights.DEFAULT)
-
+        # .features excludes global pooling and the classification layer.
         self.backbone = efficientnet.features
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+        self.backbone.requires_grad_(False)
 
-        self.conv1x1 = nn.Conv2d(1536, d_model, kernel_size=1)
+        self.projection = nn.Conv2d(1536, d_model, kernel_size=1)
+
+    def forward(self, images: Tensor) -> Tensor:
+        self.backbone.eval()
+        with torch.no_grad():
+            features = self.backbone(images)  # [B, 1536, 10, 10]
+
+        # Convert the 10x10 feature map into 100 image tokens.
+        return self.projection(features).flatten(2).transpose(1, 2)
+
+
+class ViTB16Encoder(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.backbone = models.vit_b_16(weights=models.ViT_B_16_Weights.DEFAULT)
+        self.backbone.requires_grad_(False)
+
+        self.projection = nn.Linear(self.backbone.hidden_dim, d_model)
 
     def forward(self, images):
         self.backbone.eval()
         with torch.no_grad():
-            features = self.backbone(images)   # [B, 3, 224, 224] -> [B, 768, H', W']
-        features = self.conv1x1(features)  # [B, 1536, H, W] -> [B, d_model, H, W]
-        features = features.flatten(2).permute(0,2,1)
-        return features
+            # Convert each image into 14x14 patch embeddings.
+            features = self.backbone._process_input(images)
+
+            # The pretrained encoder expects CLS together with patch tokens.
+            class_token = self.backbone.class_token.expand(images.size(0), -1, -1)
+            features = torch.cat([class_token, features], dim=1)
+            features = self.backbone.encoder(features)
+
+        # Remove CLS so the decoder receives only 196 spatial patch tokens.
+        features = features[:, 1:, :]
+        return self.projection(features)  # [B, 196, 768] -> [B, 196, d_model]
 
 
 class CLIPViTB16Encoder(nn.Module):
@@ -59,10 +75,10 @@ class CLIPViTB16Encoder(nn.Module):
     def __init__(self, d_model):
         super().__init__()
         clip_model = CLIPVisionModel.from_pretrained(self.MODEL_NAME)
-        self.backbone = getattr(clip_model, "vision_model", clip_model)
 
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+        # Support versions that wrap the actual backbone in .vision_model.
+        self.backbone = getattr(clip_model, "vision_model", clip_model)
+        self.backbone.requires_grad_(False)
 
         self.projection = nn.Linear(self.backbone.config.hidden_size, d_model)
 
@@ -71,8 +87,9 @@ class CLIPViTB16Encoder(nn.Module):
         with torch.no_grad():
             features = self.backbone(pixel_values=images).last_hidden_state
 
-        # CLIP ViT-B/16 returns one CLS token and 14x14 patch tokens.
-        return self.projection(features)  # [B, 197, 768] -> [B, 197, d_model]
+        # Remove CLS so the decoder receives only 196 spatial patch tokens.
+        features = features[:, 1:, :]
+        return self.projection(features)  # [B, 196, 768] -> [B, 196, d_model]
 
 
 
@@ -81,6 +98,8 @@ def create_encoder(backbone_name: Backbone, d_model):
         return ResNet50Encoder(d_model)
     elif backbone_name == "efficientnet_b3":
         return EfficientNetB3Encoder(d_model)
+    elif backbone_name == "vit_b16":
+        return ViTB16Encoder(d_model)
     elif backbone_name == "clip_vit_b16":
         return CLIPViTB16Encoder(d_model)
     else:
