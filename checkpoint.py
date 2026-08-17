@@ -16,15 +16,11 @@ def save_checkpoint(path, encoder, decoder, optimizer, epoch, train_loss, best_v
         }, path)
 
 
-def load_checkpoint(path, encoder, decoder, accelerator: Accelerator, optimizer = None):
-    # nếu multi-GPU, mỗi process có model riêng nên đều cần load weight
-    checkpoint = torch.load(path, map_location=accelerator.device)
+def load_checkpoint(path, encoder, decoder, device, optimizer=None):
+    checkpoint = torch.load(path, map_location=device)
 
-    unwrap_encoder = accelerator.unwrap_model(encoder)
-    unwrap_decoder = accelerator.unwrap_model(decoder)
-
-    unwrap_encoder.load_state_dict(checkpoint["encoder"])
-    unwrap_decoder.load_state_dict(checkpoint["decoder"])
+    encoder.load_state_dict(checkpoint["encoder"])
+    decoder.load_state_dict(checkpoint["decoder"])
 
     if optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])

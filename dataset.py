@@ -56,8 +56,8 @@ class MSCOCODataset(Dataset):
         row = self.df.iloc[idx]
 
         image_path = os.path.join(self.images_dir, row["filepath"], row["filename"])
-        image = Image.open(image_path).convert("RGB")
-        image = self.transform(image)
+        with Image.open(image_path) as img:
+            image = self.transform(img.convert("RGB"))
 
         tokens = row["tokens"]
         input_ids, attention_mask = self.vocab.encode_from_tokens(tokens, self.max_length)
